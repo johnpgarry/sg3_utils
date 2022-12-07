@@ -613,7 +613,6 @@ main(int argc, char * argv[])
     }
     ret = sg_simple_inquiry(sg_fd, &inq_resp, true, vb);
     printf("%s2 device_name=%s sg_fd=%d ret after inq all_rn=%d\n", __func__, device_name, sg_fd, ret, all_rn);
-    return -1;
 
 
     if (all_rn > 0) {
@@ -622,6 +621,8 @@ main(int argc, char * argv[])
         uint64_t ull;
         uint32_t bump;
 
+        printf("%s2 device_name=%s sg_fd=%d RETURNING for all_rn\n", __func__, device_name, sg_fd);
+        return -1;
         if (0 == all_last) {    /* READ CAPACITY(10 or 16) to find last */
             uint8_t resp_buff[RCAP16_RESP_LEN];
 
@@ -746,6 +747,9 @@ retry:
         if (vb)
             pr2serr("Completed %d UNMAP commands\n", j);
     } else {            /* --all= not given */
+
+        printf("%s2 device_name=%s sg_fd=%d !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, dry_run, do_force);
+
         if (dry_run) {
             pr2serr("Doing dry-run so here is 'LBA, number_of_blocks' list "
                     "of candidates\n");
@@ -762,21 +766,16 @@ retry:
             printf("%s is:  %.8s  %.16s  %.4s\n", device_name,
                    inq_resp.vendor, inq_resp.product, inq_resp.revision);
             sleep_for(3);
-            printf("\nAn UNMAP (a.k.a. trim) will commence in 15 seconds\n");
+            printf("\nAn ATOMIC_WRITE will commence in 15 seconds\n");
             printf("    Some data will be LOST\n");
             printf("        Press control-C to abort\n");
-            sleep_for(5);
-            printf("\nAn UNMAP will commence in 10 seconds\n");
-            printf("    Some data will be LOST\n");
-            printf("        Press control-C to abort\n");
-            sleep_for(5);
-            printf("\nAn UNMAP (a.k.a. trim) will commence in 5 seconds\n");
-            printf("    Some data will be LOST\n");
-            printf("        Press control-C to abort\n");
-            sleep_for(7);
+            sleep_for(10);
         }
-        res = sg_ll_unmap_v2(sg_fd, anchor, grpnum, timeout, param_arr,
+        printf("%s2 device_name=%s sg_fd=%d RETURNING before calling sg_ll_atomic_v2 !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, dry_run, do_force);
+        res = sg_ll_atomic_v2(sg_fd, anchor, grpnum, timeout, param_arr,
                              param_len, true, vb);
+        printf("%s3 device_name=%s sg_fd=%d RETURNING after res=%d calling sg_ll_atomic_v2 !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, res, dry_run, do_force);
+        return -1;
         ret = res;
         err_printed = true;
         switch (ret) {

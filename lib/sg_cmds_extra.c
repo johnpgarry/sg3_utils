@@ -2232,6 +2232,15 @@ sg_ll_unmap_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
     destruct_scsi_pt_obj(ptvp);
     return ret;
 }
+int
+sg_ll_atomic_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
+               void * paramp, int param_len, bool noisy, int vb)
+{
+	printf("%s sg_fd=%d anchor=%d group_num=%d timeout_secs=%d paramp=%p param_len=%d noisy=%d vb=%d\n",
+		__func__, sg_fd, anchor, group_num, timeout_secs, paramp, param_len, noisy, vb);
+	return 0;
+}
+
 
 /* Invokes a SCSI READ BLOCK LIMITS command. Return of 0 -> success,
  * various SG_LIB_CAT_* positive values or -1 -> other errors */
