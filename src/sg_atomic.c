@@ -612,7 +612,7 @@ main(int argc, char * argv[])
         goto err_out;
     }
     ret = sg_simple_inquiry(sg_fd, &inq_resp, true, vb);
-    printf("%s2 device_name=%s sg_fd=%d ret after inq all_rn=%d\n", __func__, device_name, sg_fd, ret, all_rn);
+    printf("%s2 device_name=%s sg_fd=%d ret=%c after inq all_rn=%d\n", __func__, device_name, sg_fd, ret, all_rn);
 
 
     if (all_rn > 0) {
@@ -774,7 +774,7 @@ retry:
         printf("%s2 device_name=%s sg_fd=%d RETURNING before calling sg_ll_atomic_v2 !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, dry_run, do_force);
         res = sg_ll_atomic_v2(sg_fd, anchor, grpnum, timeout, param_arr,
                              param_len, true, vb);
-        printf("%s3 device_name=%s sg_fd=%d RETURNING after res=%d calling sg_ll_atomic_v2 !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, res, dry_run, do_force);
+        printf("%s3 device_name=%s sg_fd=%d RETURNING after res=%d calling sg_ll_atomic_v2\n", __func__, device_name, sg_fd, res);
         return -1;
         ret = res;
         err_printed = true;

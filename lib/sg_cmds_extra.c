@@ -90,6 +90,8 @@
 #define PRE_FETCH10_CMDLEN 10
 #define PRE_FETCH16_CMD 0x90
 #define PRE_FETCH16_CMDLEN 16
+#define WRITE_ATOMIC_16 0x9c
+#define WRITE_ATOMIC_16_LEN 16
 #define SEEK10_CMD 0x2b
 #define SEEK10_CMDLEN 10
 
@@ -2236,8 +2238,64 @@ int
 sg_ll_atomic_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
                void * paramp, int param_len, bool noisy, int vb)
 {
-	printf("%s sg_fd=%d anchor=%d group_num=%d timeout_secs=%d paramp=%p param_len=%d noisy=%d vb=%d\n",
-		__func__, sg_fd, anchor, group_num, timeout_secs, paramp, param_len, noisy, vb);
+    static const char * const cdb_s = "unmap";
+    int res, ret, s_cat, tmout;
+    uint8_t uw_cdb[WRITE_ATOMIC_16_LEN] =
+                         {WRITE_ATOMIC_16, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t sense_b[SENSE_BUFF_LEN] = {0};
+    struct sg_pt_base * ptvp;
+
+    printf("%s sg_fd=%d anchor=%d group_num=%d timeout_secs=%d paramp=%p param_len=%d noisy=%d vb=%d\n",
+        __func__, sg_fd, anchor, group_num, timeout_secs, paramp, param_len, noisy, vb);
+
+  //  if (anchor)
+   //     u_cdb[1] |= 0x1;
+    tmout = (timeout_secs > 0) ? timeout_secs : DEF_PT_TIMEOUT;
+  //  u_cdb[6] = group_num & GRPNUM_MASK;
+ //   sg_put_unaligned_be16((uint16_t)param_len, u_cdb + 7);
+    if (vb) {
+        char b[128];
+
+        pr2ws("    %s cdb: %s\n", cdb_s,
+              sg_get_command_str(uw_cdb, WRITE_ATOMIC_16_LEN,
+                                 false, sizeof(b), b));
+        if ((vb > 1) && paramp && param_len) {
+            pr2ws("    %s parameter list:\n", cdb_s);
+            hex2stderr((const uint8_t *)paramp, param_len, -1);
+        }
+    }
+
+    if (NULL == ((ptvp = create_pt_obj(cdb_s))))
+        return -1;
+    set_scsi_pt_cdb(ptvp, uw_cdb, sizeof(uw_cdb));
+    set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
+    set_scsi_pt_data_out(ptvp, (uint8_t *)paramp, param_len);
+    res = do_scsi_pt(ptvp, sg_fd, tmout, vb);
+    printf("%s2 sg_fd=%d after do_scsi_pt res=%d\n",
+        __func__, sg_fd, res);
+    return -1;
+    ret = sg_cmds_process_resp(ptvp, cdb_s, res, noisy, vb, &s_cat);
+    if (-1 == ret) {
+        if (get_scsi_pt_transport_err(ptvp))
+            ret = SG_LIB_TRANSPORT_ERROR;
+        else
+            ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
+    } else if (-2 == ret) {
+        switch (s_cat) {
+        case SG_LIB_CAT_RECOVERED:
+        case SG_LIB_CAT_NO_SENSE:
+            ret = 0;
+            break;
+        default:
+            ret = s_cat;
+            break;
+        }
+    } else
+        ret = 0;
+    destruct_scsi_pt_obj(ptvp);
+    return ret;
+
+
 	return 0;
 }
 

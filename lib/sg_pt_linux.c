@@ -1037,7 +1037,7 @@ do_scsi_pt_v3(struct sg_pt_linux_scsi * ptp, int fd, int time_secs,
               int verbose)
 {
     struct sg_io_hdr v3_hdr;
-
+    printf("%s ptp=%p fd=%d\n", __func__, ptp, fd);
     memset(&v3_hdr, 0, sizeof(v3_hdr));
     /* convert v4 to v3 header */
     v3_hdr.interface_id = 'S';
@@ -1098,6 +1098,7 @@ static int
 do_scsi_pt_v4(struct sg_pt_linux_scsi * ptp, int fd, int time_secs,
               int verbose)
 {
+    printf("%s ptp=%p fd=%d\n", __func__, ptp, fd);
     if (0 == ptp->io_hdr.request) {
         if (verbose)
             pr2ws("No SCSI command (cdb) given [v4]\n");
