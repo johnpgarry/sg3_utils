@@ -356,9 +356,17 @@ bad_exit:
     return 1;
 }
 
+int
+sg_atomic(int argc, char * argv[]);
 
 int
 main(int argc, char * argv[])
+{
+    return sg_atomic(argc, argv);
+}
+
+int
+sg_atomic(int argc, char * argv[])
 {
     bool anchor = false;
     bool do_force = false;
@@ -612,7 +620,7 @@ main(int argc, char * argv[])
         goto err_out;
     }
     ret = sg_simple_inquiry(sg_fd, &inq_resp, true, vb);
-    printf("%s2 device_name=%s sg_fd=%d ret=%c after inq all_rn=%d\n", __func__, device_name, sg_fd, ret, all_rn);
+    printf("%s2 device_name=%s sg_fd=%d ret=%c after inq all_rn=%d addr_arr_len=%d\n", __func__, device_name, sg_fd, ret, all_rn, addr_arr_len);
 
 
     if (all_rn > 0) {
@@ -748,7 +756,7 @@ retry:
             pr2serr("Completed %d UNMAP commands\n", j);
     } else {            /* --all= not given */
 
-        printf("%s2 device_name=%s sg_fd=%d !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, dry_run, do_force);
+        printf("%s2 device_name=%s sg_fd=%d !all_rn dry_run=%d do_force=%d addr_arr_len=%d\n", __func__, device_name, sg_fd, dry_run, do_force, addr_arr_len);
 
         if (dry_run) {
             pr2serr("Doing dry-run so here is 'LBA, number_of_blocks' list "

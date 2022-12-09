@@ -699,11 +699,13 @@ set_scsi_pt_data_out(struct sg_pt_base * vp, const uint8_t * dxferp,
 {
     struct sg_pt_linux_scsi * ptp = &vp->impl;
 
+    printf("%s1 dout_xferp=0x%llx dout_xfer_len=0x%x\n", __func__,  ptp->io_hdr.dout_xferp, ptp->io_hdr.dout_xfer_len);
     if (ptp->io_hdr.dout_xferp)
         ++ptp->in_err;
     if (dxfer_olen > 0) {
         ptp->io_hdr.dout_xferp = (__u64)(sg_uintptr_t)dxferp;
         ptp->io_hdr.dout_xfer_len = dxfer_olen;
+        printf("%s2 dout_xferp=0x%llx dout_xfer_len=0x%x\n", __func__,  ptp->io_hdr.dout_xferp, ptp->io_hdr.dout_xfer_len);
     }
 }
 
