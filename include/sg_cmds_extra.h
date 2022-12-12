@@ -264,8 +264,9 @@ int sg_ll_unmap(int sg_fd, int group_num, int timeout_secs, void * paramp,
  * (sbc3r22). Otherwise same as sg_ll_unmap() . */
 int sg_ll_unmap_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
                    void * paramp, int param_len, bool noisy, int verbose);
-int sg_ll_atomic_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
-                   void * paramp, int param_len, bool noisy, int verbose);
+int sg_ll_atomic_v2(int sg_fd, bool do_seek10, bool cdb16, bool immed,
+                      uint64_t lba, uint32_t num_blocks, int group_num,
+                      int timeout_secs, bool noisy, int verbose);
 
 /* Invokes a SCSI VERIFY (10) command (SBC and MMC).
  * Note that 'veri_len' is in blocks while 'data_out_len' is in bytes.

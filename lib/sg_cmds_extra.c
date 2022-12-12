@@ -2235,45 +2235,86 @@ sg_ll_unmap_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
     return ret;
 }
 int
-sg_ll_atomic_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
-               void * paramp, int param_len, bool noisy, int vb)
+sg_ll_atomic_v2(int sg_fd, bool do_seek10, bool cdb16, bool immed,
+                  uint64_t lba, uint32_t num_blocks, int group_num,
+                  int timeout_secs, bool noisy, int vb)
 {
-    static const char * const cdb_s = "atomic";
-    int res, ret, s_cat, tmout;
-    uint8_t uw_cdb[WRITE_ATOMIC_16_LEN] =
-                         {WRITE_ATOMIC_16, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    static const char * const cdb_atomic_s = "atomic(16)";
+    int res, s_cat, ret, cdb_len, tmout;
+    const char *cdb_s;
     uint8_t sense_b[SENSE_BUFF_LEN] = {0};
+    uint8_t uw_cdb[WRITE_ATOMIC_16_LEN];
     struct sg_pt_base * ptvp;
 
-    printf("%s sg_fd=%d anchor=%d group_num=%d timeout_secs=%d paramp=%p param_len=%d noisy=%d vb=%d\n",
-        __func__, sg_fd, anchor, group_num, timeout_secs, paramp, param_len, noisy, vb);
+    do_seek10 = false;
+    cdb16 = true;
+    immed = false;
 
-  //  if (anchor)
-   //     u_cdb[1] |= 0x1;
+    printf("%s lba=0x%lx immed=%d group_num=%d\n", __func__, lba, immed, group_num);
+
+    memset(uw_cdb, 0, sizeof(uw_cdb));
+    if (do_seek10) {
+        /*
+        if (lba > UINT32_MAX) {
+            if (vb)
+                pr2ws("%s: LBA exceeds 2**32 in %s\n", __func__,
+                      cdb_seek_name_s);
+            return -1;
+        }
+        preFetchCdb[0] = SEEK10_CMD;
+        cdb_len = SEEK10_CMDLEN;
+        cdb_s = cdb_seek_name_s;
+        sg_put_unaligned_be32((uint32_t)lba, preFetchCdb + 2);
+        */
+    } else {
+        if ((! cdb16) &&
+            ((lba > UINT32_MAX) || (num_blocks > UINT16_MAX))) {
+            cdb16 = true;
+            if (noisy || vb)
+                pr2ws("%s: do %s due to %s size\n", __func__, "cdb16_name_s?",
+                      (lba > UINT32_MAX) ? "LBA" : "NUM_BLOCKS");
+        }
+        if (cdb16) {
+            uw_cdb[0] = WRITE_ATOMIC_16;
+            cdb_len = WRITE_ATOMIC_16_LEN;
+            cdb_s = cdb_atomic_s;
+  
+            sg_put_unaligned_be64(lba, uw_cdb + 2);
+        } else {
+            /*
+            preFetchCdb[0] = PRE_FETCH10_CMD;
+            cdb_len = PRE_FETCH10_CMDLEN;
+            cdb_s = cdb10_name_s;
+            if (immed)
+                preFetchCdb[1] = 0x2;
+            sg_put_unaligned_be32((uint32_t)lba, preFetchCdb + 2);
+            preFetchCdb[6] = GRPNUM_MASK & group_num;
+            sg_put_unaligned_be16((uint16_t)num_blocks, preFetchCdb + 7);
+            */
+        }
+    }
     tmout = (timeout_secs > 0) ? timeout_secs : DEF_PT_TIMEOUT;
-  //  u_cdb[6] = group_num & GRPNUM_MASK;
- //   sg_put_unaligned_be16((uint16_t)param_len, u_cdb + 7);
     if (vb) {
         char b[128];
 
         pr2ws("    %s cdb: %s\n", cdb_s,
-              sg_get_command_str(uw_cdb, WRITE_ATOMIC_16_LEN,
-                                 false, sizeof(b), b));
-        if ((vb > 1) && paramp && param_len) {
-            pr2ws("    %s parameter list:\n", cdb_s);
-            hex2stderr((const uint8_t *)paramp, param_len, -1);
-        }
+              sg_get_command_str(uw_cdb, cdb_len, false, sizeof(b), b));
     }
-
     if (NULL == ((ptvp = create_pt_obj(cdb_s))))
         return -1;
-    set_scsi_pt_cdb(ptvp, uw_cdb, sizeof(uw_cdb));
+    set_scsi_pt_cdb(ptvp, uw_cdb, cdb_len);
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_out(ptvp, (uint8_t *)paramp, param_len);
     res = do_scsi_pt(ptvp, sg_fd, tmout, vb);
-    printf("%s2 sg_fd=%d after do_scsi_pt res=%d\n",
-        __func__, sg_fd, res);
-    return -1;
+    if (0 == res) {
+        int sstat = get_scsi_pt_status_response(ptvp);
+
+        if (SG_LIB_CAT_CONDITION_MET == sstat) {
+            ret = SG_LIB_CAT_CONDITION_MET;
+            if (vb > 2)
+                pr2ws("%s: returns SG_LIB_CAT_CONDITION_MET\n", __func__);
+            goto fini;
+        }
+    }
     ret = sg_cmds_process_resp(ptvp, cdb_s, res, noisy, vb, &s_cat);
     if (-1 == ret) {
         if (get_scsi_pt_transport_err(ptvp))
@@ -2292,11 +2333,9 @@ sg_ll_atomic_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
         }
     } else
         ret = 0;
+fini:
     destruct_scsi_pt_obj(ptvp);
     return ret;
-
-
-	return 0;
 }
 
 

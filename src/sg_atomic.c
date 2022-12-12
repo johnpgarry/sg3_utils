@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2018 Douglas Gilbert.
+ * Copyright (c) 2018-2020 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -11,68 +11,69 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
-#include <limits.h>
 #define __STDC_FORMAT_MACROS 1
 #include <inttypes.h>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+#include <time.h>
+#elif defined(HAVE_GETTIMEOFDAY)
+#include <time.h>
+#include <sys/time.h>
+#endif
+
 #include "sg_lib.h"
+#include "sg_lib_data.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-#if defined(MSC_VER) || defined(__MINGW32__)
-#define HAVE_MS_SLEEP
-#endif
-
-#ifdef HAVE_MS_SLEEP
-#include <windows.h>
-#define sleep_for(seconds)    Sleep( (seconds) * 1000)
-#else
-#define sleep_for(seconds)    sleep(seconds)
-#endif
-
-/* A utility program originally written for the Linux OS SCSI subsystem.
- *
- * This utility invokes the UNMAP SCSI command to unmap (trim) one or more
- * logical blocks. Note that DATA MAY BE LOST.
+/*
+ * This program issues one or more SCSI SEEK(10), PRE-FETCH(10) or
+ * PRE-FETCH(16) commands. Both PRE-FETCH commands are current and appear
+ * in the most recent SBC-4 draft (sbc4r15.pdf at time of writing) while
+ * SEEK(10) has been obsolete since SBC-2 (2004). Currently more hard disks
+ * and SSDs support SEEK(10) than PRE-FETCH. It is even unclear what
+ * SEEK(10) means (defined in SBC-1 as moving the hard disk heads to the
+ * track containing the given LBA) for a SSD. But if the manufacturers'
+ * support it, then it must have a use, presumably to speed the next access
+ * to that LBA ...
  */
 
-static const char * version_str = "1.17 20180628";
+static const char * version_str = "1.08 20200115";
 
+#define BACKGROUND_CONTROL_SA 0x15
 
-#define DEF_TIMEOUT_SECS 60
-#define MAX_NUM_ADDR 128
-#define RCAP10_RESP_LEN 8
-#define RCAP16_RESP_LEN 32
-
-#ifndef UINT32_MAX
-#define UINT32_MAX ((uint32_t)-1)
-#endif
+#define CMD_ABORT_TIMEOUT  60      /* 60 seconds */
 
 
 static struct option long_options[] = {
-        {"all", required_argument, 0, 'A'},
-        {"anchor", no_argument, 0, 'a'},
-        {"dry-run", no_argument, 0, 'd'},
-        {"dry_run", no_argument, 0, 'd'},
-        {"force", no_argument, 0, 'f'},
+        {"10", no_argument, 0, 'T'},
+        {"count", required_argument, 0, 'c'},
         {"grpnum", required_argument, 0, 'g'},
         {"help", no_argument, 0, 'h'},
-        {"in", required_argument, 0, 'I'},
+        {"immed", no_argument, 0, 'i'},
         {"lba", required_argument, 0, 'l'},
-        {"num", required_argument, 0, 'n'},
-        {"timeout", required_argument, 0, 't'},
+        {"num-blocks", required_argument, 0, 'n'},
+        {"num_blocks", required_argument, 0, 'n'},
+        {"pre-fetch", no_argument, 0, 'p'},
+        {"pre_fetch", no_argument, 0, 'p'},
+        {"readonly", no_argument, 0, 'r'},
+        {"skip", required_argument, 0, 's'},
+        {"time", required_argument, 0, 't'},
         {"verbose", no_argument, 0, 'v'},
         {"version", no_argument, 0, 'V'},
+        {"wrap-offset", required_argument, 0, 'w'},
+        {"wrap_offset", required_argument, 0, 'w'},
         {0, 0, 0, 0},
 };
 
@@ -81,409 +82,178 @@ static void
 usage()
 {
     pr2serr("Usage: "
-          "sg_unmap [--all=ST,RN[,LA]] [--anchor] [--dry-run] [--force]\n"
-          "                [--grpnum=GN] [--help] [--in=FILE] "
-          "[--lba=LBA,LBA...]\n"
-          "                [--num=NUM,NUM...] [--timeout=TO] [--verbose] "
-          "[--version]\n"
-          "                DEVICE\n"
-          "  where:\n"
-          "    --all=ST,RN[,LA]|-A ST,RN[,LA]    start unmaps at LBA ST, "
-          "RN blocks\n"
-          "                         per unmap until the end of disk, or "
-          "until\n"
-          "                         and including LBA LA (last)\n"
-          "    --anchor|-a          set anchor field in cdb\n"
-          "    --dry-run|-d         prepare but skip UNMAP call(s)\n"
-          "    --force|-f           don't ask for confirmation before "
-          "zapping media\n"
-          "    --grpnum=GN|-g GN    GN is group number field (def: 0)\n"
-          "    --help|-h            print out usage message\n"
-          "    --in=FILE|-I FILE    read LBA, NUM pairs from FILE (if "
-          "FILE is '-'\n"
-          "                         then stdin is read)\n"
-          "    --lba=LBA,LBA...|-l LBA,LBA...    LBA is the logical block "
-          "address\n"
-          "                                      to start NUM unmaps\n"
-          "    --num=NUM,NUM...|-n NUM,NUM...    NUM is number of logical "
-          "blocks to\n"
-          "                                      unmap starting at "
-          "corresponding LBA\n"
-          "    --timeout=TO|-t TO    command timeout (unit: seconds) "
-          "(def: 60)\n"
-          "    --verbose|-v         increase verbosity\n"
-          "    --version|-V         print version string and exit\n\n"
-          "Perform a SCSI UNMAP command. LBA, NUM and the values in FILE "
-          "are assumed\nto be decimal. Use '0x' prefix or 'h' suffix for "
-          "hex values.\n"
-          "Example to unmap LBA 0x12345:\n"
-          "    sg_unmap --lba=0x12345 --num=1 /dev/sdb\n"
-          "Example to unmap starting at LBA 0x12345, 256 blocks per command:"
-          "\n    sg_unmap --all=0x12345,256 /dev/sg2\n"
-          "until the end if /dev/sg2 (assumed to be a storage device)\n\n"
-          );
-    pr2serr("WARNING: This utility will destroy data on DEVICE in the given "
-            "range(s)\nthat will be unmapped. Unmap is also known as 'trim' "
-            "and is irreversible.\n");
+            "sg_seek  [--10] [--count=NC] [--grpnum=GN] [--help] [--immed]\n"
+            "                [--lba=LBA] [--num-blocks=NUM] [--pre-fetch] "
+            "[--readonly]\n"
+            "                [--skip=SB] [--time] [--verbose] [--version]\n"
+            "                [--wrap-offset=WO] DEVICE\n");
+    pr2serr("  where:\n"
+            "    --10|-T             do PRE-FETCH(10) command (def: "
+            "SEEK(10), or\n"
+            "                        PRE-FETCH(16) if --pre-fetch also "
+            "given)\n"
+            "    --count=NC|-c NC    NC is number of commands to execute "
+            "(def: 1)\n"
+            "    --grpnum=GN|-g GN    GN is group number to place in "
+            "PRE-FETCH\n"
+            "                         cdb; 0 to 63 (def: 0)\n"
+            "    --help|-h           print out usage message\n"
+            "    --immed|-i          set IMMED bit in PRE-FETCH command\n"
+            "    --lba=LBA|-l LBA    starting Logical Block Address (LBA) "
+            "(def: 0)\n"
+            "    --num-blocks=NUM|-n NUM    number of blocks to cache (for "
+            "PRE-FETCH)\n"
+            "                               (def: 1). Ignored by "
+            "SEEK(10)\n");
+    pr2serr("    --pre-fetch|-p     do PRE-FETCH command, 16 byte variant if "
+            "--10 not\n"
+            "                       given (def: do SEEK(10))\n"
+            "    --readonly|-r      open DEVICE read-only (if supported)\n"
+            "    --skip=SB|-s SB    when NC>1 skip SB blocks to next LBA "
+            "(def: 1)\n"
+            "    --time|-t          time the command(s) and if NC>1 show "
+            "usecs/command\n"
+            "                       (def: don't time)\n"
+            "    --verbose|-v       increase verbosity\n"
+            "    --version|-V       print version string and exit\n"
+            "    --wrap-offset=WO|-w WO    if SB>0 and WO>0 then if "
+            "LBAn>LBA+WO\n"
+            "                       then reset LBAn back to LBA (def: 0)\n\n"
+            "Performs SCSI SEEK(10), PRE-FETCH(10) or PRE-FETCH(16) "
+            "command(s).If no\noptions are given does one SEEK(10) command "
+            "with an LBA of 0 . If NC>1\nthen a tally is kept of successes, "
+            "'condition-met's and errors that is\nprinted on completion. "
+            "'condition-met' is from PRE-FETCH when NUM blocks\nfit in "
+            "the DEVICE's cache.\n"
+           );
 }
 
-/* Read numbers (up to 64 bits in size) from command line (comma (or
- * (single) space) separated list). Assumed decimal unless prefixed
- * by '0x', '0X' or contains trailing 'h' or 'H' (which indicate hex).
- * Returns 0 if ok, or 1 if error. */
-static int
-build_lba_arr(const char * inp, uint64_t * lba_arr, int * lba_arr_len,
-              int max_arr_len)
-{
-    int in_len, k;
-    int64_t ll;
-    const char * lcp;
-    char * cp;
-    char * c2p;
-
-    if ((NULL == inp) || (NULL == lba_arr) ||
-        (NULL == lba_arr_len))
-        return 1;
-    lcp = inp;
-    in_len = strlen(inp);
-    if (0 == in_len)
-        *lba_arr_len = 0;
-    if ('-' == inp[0]) {        /* read from stdin */
-        pr2serr("'--lba' cannot be read from stdin\n");
-        return 1;
-    } else {        /* list of numbers (default decimal) on command line */
-        k = strspn(inp, "0123456789aAbBcCdDeEfFhHxXiIkKmMgGtTpP, ");
-        if (in_len != k) {
-            pr2serr("build_lba_arr: error at pos %d\n", k + 1);
-            return 1;
-        }
-        for (k = 0; k < max_arr_len; ++k) {
-            ll = sg_get_llnum(lcp);
-            if (-1 != ll) {
-                lba_arr[k] = (uint64_t)ll;
-                cp = (char *)strchr(lcp, ',');
-                c2p = (char *)strchr(lcp, ' ');
-                if (NULL == cp)
-                    cp = c2p;
-                if (NULL == cp)
-                    break;
-                if (c2p && (c2p < cp))
-                    cp = c2p;
-                lcp = cp + 1;
-            } else {
-                pr2serr("build_lba_arr: error at pos %d\n",
-                        (int)(lcp - inp + 1));
-                return 1;
-            }
-        }
-        *lba_arr_len = k + 1;
-        if (k == max_arr_len) {
-            pr2serr("build_lba_arr: array length exceeded\n");
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* Read numbers (up to 32 bits in size) from command line (comma (or
- * (single) space) separated list). Assumed decimal unless prefixed
- * by '0x', '0X' or contains trailing 'h' or 'H' (which indicate hex).
- * Returns 0 if ok, or 1 if error. */
-static int
-build_num_arr(const char * inp, uint32_t * num_arr, int * num_arr_len,
-              int max_arr_len)
-{
-    int in_len, k;
-    const char * lcp;
-    int64_t ll;
-    char * cp;
-    char * c2p;
-
-    if ((NULL == inp) || (NULL == num_arr) ||
-        (NULL == num_arr_len))
-        return 1;
-    lcp = inp;
-    in_len = strlen(inp);
-    if (0 == in_len)
-        *num_arr_len = 0;
-    if ('-' == inp[0]) {        /* read from stdin */
-        pr2serr("'--len' cannot be read from stdin\n");
-        return 1;
-    } else {        /* list of numbers (default decimal) on command line */
-        k = strspn(inp, "0123456789aAbBcCdDeEfFhHxXiIkKmMgGtTpP, ");
-        if (in_len != k) {
-            pr2serr("build_num_arr: error at pos %d\n", k + 1);
-            return 1;
-        }
-        for (k = 0; k < max_arr_len; ++k) {
-            ll = sg_get_llnum(lcp);
-            if (-1 != ll) {
-                if (ll > UINT32_MAX) {
-                    pr2serr("build_num_arr: number exceeds 32 bits at pos "
-                            "%d\n", (int)(lcp - inp + 1));
-                    return 1;
-                }
-                num_arr[k] = (uint32_t)ll;
-                cp = (char *)strchr(lcp, ',');
-                c2p = (char *)strchr(lcp, ' ');
-                if (NULL == cp)
-                    cp = c2p;
-                if (NULL == cp)
-                    break;
-                if (c2p && (c2p < cp))
-                    cp = c2p;
-                lcp = cp + 1;
-            } else {
-                pr2serr("build_num_arr: error at pos %d\n",
-                        (int)(lcp - inp + 1));
-                return 1;
-            }
-        }
-        *num_arr_len = k + 1;
-        if (k == max_arr_len) {
-            pr2serr("build_num_arr: array length exceeded\n");
-            return 1;
-        }
-    }
-    return 0;
-}
-
-
-/* Read numbers from filename (or stdin) line by line (comma (or
- * (single) space) separated list). Assumed decimal unless prefixed
- * by '0x', '0X' or contains trailing 'h' or 'H' (which indicate hex).
- * Returns 0 if ok, or 1 if error. */
-static int
-build_joint_arr(const char * file_name, uint64_t * lba_arr, uint32_t * num_arr,
-                int * arr_len, int max_arr_len)
-{
-    bool have_stdin;
-    int off = 0;
-    int in_len, k, j, m, ind, bit0;
-    int64_t ll;
-    char line[1024];
-    char * lcp;
-    FILE * fp;
-
-    have_stdin = ((1 == strlen(file_name)) && ('-' == file_name[0]));
-    if (have_stdin)
-        fp = stdin;
-    else {
-        fp = fopen(file_name, "r");
-        if (NULL == fp) {
-            pr2serr("%s: unable to open %s\n", __func__, file_name);
-            return 1;
-        }
-    }
-
-    for (j = 0; j < 512; ++j) {
-        if (NULL == fgets(line, sizeof(line), fp))
-            break;
-        // could improve with carry_over logic if sizeof(line) too small
-        in_len = strlen(line);
-        if (in_len > 0) {
-            if ('\n' == line[in_len - 1]) {
-                --in_len;
-                line[in_len] = '\0';
-            }
-        }
-        if (in_len < 1)
-            continue;
-        lcp = line;
-        m = strspn(lcp, " \t");
-        if (m == in_len)
-            continue;
-        lcp += m;
-        in_len -= m;
-        if ('#' == *lcp)
-            continue;
-        k = strspn(lcp, "0123456789aAbBcCdDeEfFhHxXiIkKmMgGtTpP ,\t");
-        if ((k < in_len) && ('#' != lcp[k])) {
-            pr2serr("%s: syntax error at line %d, pos %d\n", __func__, j + 1,
-                    m + k + 1);
-            goto bad_exit;
-        }
-        for (k = 0; k < 1024; ++k) {
-            ll = sg_get_llnum(lcp);
-            if (-1 != ll) {
-                ind = ((off + k) >> 1);
-                bit0 = 0x1 & (off + k);
-                if (ind >= max_arr_len) {
-                    pr2serr("%s: array length exceeded\n", __func__);
-                    goto bad_exit;
-                }
-                if (bit0) {
-                    if (ll > UINT32_MAX) {
-                        pr2serr("%s: number exceeds 32 bits in line %d, at "
-                                "pos %d\n", __func__, j + 1,
-                                (int)(lcp - line + 1));
-                        goto bad_exit;
-                    }
-                    num_arr[ind] = (uint32_t)ll;
-                } else
-                   lba_arr[ind] = (uint64_t)ll;
-                lcp = strpbrk(lcp, " ,\t");
-                if (NULL == lcp)
-                    break;
-                lcp += strspn(lcp, " ,\t");
-                if ('\0' == *lcp)
-                    break;
-            } else {
-                if ('#' == *lcp) {
-                    --k;
-                    break;
-                }
-                pr2serr("%s: error on line %d, at pos %d\n", __func__, j + 1,
-                        (int)(lcp - line + 1));
-                goto bad_exit;
-            }
-        }
-        off += (k + 1);
-    }
-    if (0x1 & off) {
-        pr2serr("%s: expect LBA,NUM pairs but decoded odd number\n  from "
-                "%s\n", __func__, have_stdin ? "stdin" : file_name);
-        goto bad_exit;
-    }
-    *arr_len = off >> 1;
-    if (fp && (stdin != fp))
-        fclose(fp);
-    return 0;
-
-bad_exit:
-    if (fp && (stdin != fp))
-        fclose(fp);
-    return 1;
-}
-
-int
-sg_atomic(int argc, char * argv[]);
 
 int
 main(int argc, char * argv[])
 {
-    return sg_atomic(argc, argv);
-}
-
-int
-sg_atomic(int argc, char * argv[])
-{
-    bool anchor = false;
-    bool do_force = false;
-    bool dry_run = false;
-    bool err_printed = false;
+    bool cdb10 = false;
+    bool count_given = false;
+    bool do_time = false;
+    bool immed = false;
+    bool prefetch = false;
+    bool readonly = false;
+    bool start_tm_valid = false;
     bool verbose_given = false;
     bool version_given = false;
-    int res, c, num, k, j;
+    int res, c;
     int sg_fd = -1;
-    int grpnum = 0;
-    int addr_arr_len = 0;
-    int num_arr_len = 0;
-    int param_len = 4;
+    int first_err = 0;
+    int last_err = 0;
     int ret = 0;
-    int timeout = DEF_TIMEOUT_SECS;
-    int vb = 0;
-    uint32_t all_rn = 0;        /* Repetition Number, 0 for inactive */
-    uint64_t all_start = 0;
-    uint64_t all_last = 0;
+    int verbose = 0;
+    uint32_t count = 1;
+    int32_t l;
+    uint32_t grpnum = 0;
+    uint32_t k;
+    uint32_t num_cond_met = 0;
+    uint32_t num_err = 0;
+    uint32_t num_good = 0;
+    uint32_t numblocks = 1;
+    uint32_t skip = 1;
+    uint32_t wrap_offs = 0;
     int64_t ll;
-    const char * lba_op = NULL;
-    const char * num_op = NULL;
-    const char * in_op = NULL;
+    int64_t elapsed_usecs = 0;
+    uint64_t lba = 0;
+    uint64_t lba_n;
     const char * device_name = NULL;
-    char * first_comma = NULL;
-    char * second_comma = NULL;
-    struct sg_simple_inquiry_resp inq_resp;
-    uint64_t addr_arr[MAX_NUM_ADDR];
-    uint32_t num_arr[MAX_NUM_ADDR];
-    uint8_t param_arr[8 + (MAX_NUM_ADDR * 16)];
+    const char * cdb_name = NULL;
+    char b[64];
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+    struct timespec start_tm, end_tm;
+#elif defined(HAVE_GETTIMEOFDAY)
+    struct timeval start_tm, end_tm;
+#endif
 
     while (1) {
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "aA:dfg:hI:Hl:n:t:vV", long_options,
+        c = getopt_long(argc, argv, "c:g:hil:n:prs:tTvVw:", long_options,
                         &option_index);
         if (c == -1)
             break;
 
         switch (c) {
-        case 'a':
-            anchor = true;
-            break;
-        case 'A':
-            first_comma = strchr(optarg, ',');
-            if (NULL == first_comma) {
-                pr2serr("--all=ST,RN[,LA] expects at least one comma in "
-                        "argument, found none\n");
+        case 'c':
+            l = sg_get_num(optarg);
+            if (l < 0) {
+                pr2serr("--count= unable to decode argument, want 0 or "
+                        "higher\n");
                 return SG_LIB_SYNTAX_ERROR;
             }
-            ll = sg_get_llnum(optarg);
-            if (ll < 0) {
-                pr2serr("unable to decode --all=ST,.... (starting LBA)\n");
-                return SG_LIB_SYNTAX_ERROR;
-            }
-            all_start = (uint64_t)ll;
-            ll = sg_get_llnum(first_comma + 1);
-            if ((ll < 0) || (ll > UINT32_MAX)) {
-                pr2serr("unable to decode --all=ST,RN.... (repeat number)\n");
-                return SG_LIB_SYNTAX_ERROR;
-            }
-            all_rn = (uint32_t)ll;
-            if (0 == ll)
-                pr2serr("warning: --all=ST,RN... being ignored because RN "
-                        "is 0\n");
-            second_comma = strchr(first_comma + 1, ',');
-            if (second_comma) {
-                ll = sg_get_llnum(second_comma + 1);
-                if (ll < 0) {
-                    pr2serr("unable to decode --all=ST,NR,LA (last LBA)\n");
-                    return SG_LIB_SYNTAX_ERROR;
-                }
-                all_last = (uint64_t)ll;
-            }
-            break;
-        case 'd':
-            dry_run = true;
-            break;
-        case 'f':
-            do_force = true;
+            count = (uint32_t)l;
+            count_given = true;
             break;
         case 'g':
-            num = sscanf(optarg, "%d", &res);
-            if ((1 == num) && (res >= 0) && (res <= 63))
-                grpnum = res;
-            else {
-                pr2serr("value for '--grpnum=' must be 0 to 63\n");
+            l = sg_get_num(optarg);
+            if ((l > 63) || (l < 0)) {
+                pr2serr("--grpnum= expect argument in range 0 to 63\n");
                 return SG_LIB_SYNTAX_ERROR;
             }
+            grpnum = (uint32_t)l;
             break;
         case 'h':
         case '?':
             usage();
             return 0;
-        case 'I':
-            in_op = optarg;
+        case 'i':
+            immed = true;
             break;
         case 'l':
-            lba_op = optarg;
+            ll = sg_get_llnum(optarg);
+            if (-1 == ll) {
+                pr2serr("--lba= unable to decode argument\n");
+                return SG_LIB_SYNTAX_ERROR;
+            }
+            lba = (uint64_t)ll;
             break;
         case 'n':
-            num_op = optarg;
+            l = sg_get_num(optarg);
+            if (-1 == l) {
+                pr2serr("--num= unable to decode argument\n");
+                return SG_LIB_SYNTAX_ERROR;
+            }
+            numblocks = (uint32_t)l;
+            break;
+        case 'p':
+            prefetch = true;
+            break;
+        case 'r':
+            readonly = true;
+            break;
+        case 's':
+            l = sg_get_num(optarg);
+            if (-1 == l) {
+                pr2serr("--skip= unable to decode argument\n");
+                return SG_LIB_SYNTAX_ERROR;
+            }
+            skip = (uint32_t)l;
             break;
         case 't':
-            timeout = sg_get_num(optarg);
-            if (timeout < 0)  {
-                pr2serr("bad argument to '--timeout'\n");
-                return SG_LIB_SYNTAX_ERROR;
-            } else if (0 == timeout)
-                timeout = DEF_TIMEOUT_SECS;
+            do_time = true;
+            break;
+        case 'T':
+            cdb10 = true;
             break;
         case 'v':
             verbose_given = true;
-            ++vb;
+            ++verbose;
             break;
         case 'V':
             version_given = true;
+            break;
+        case 'w':
+            l = sg_get_num(optarg);
+            if (-1 == l) {
+                pr2serr("--wrap-offset= unable to decode argument\n");
+                return SG_LIB_SYNTAX_ERROR;
+            }
+            wrap_offs = (uint32_t)l;
             break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
@@ -498,7 +268,8 @@ sg_atomic(int argc, char * argv[])
         }
         if (optind < argc) {
             for (; optind < argc; ++optind)
-                pr2serr("Unexpected extra argument: %s\n", argv[optind]);
+                pr2serr("Unexpected extra argument: %s\n",
+                        argv[optind]);
             usage();
             return SG_LIB_SYNTAX_ERROR;
         }
@@ -510,12 +281,12 @@ sg_atomic(int argc, char * argv[])
         pr2serr("but override: '-vV' given, zero verbose and continue\n");
         verbose_given = false;
         version_given = false;
-        vb = 0;
+        verbose = 0;
     } else if (! verbose_given) {
         pr2serr("set '-vv'\n");
-        vb = 2;
+        verbose = 2;
     } else
-        pr2serr("keep verbose=%d\n", vb);
+        pr2serr("keep verbose=%d\n", verbose);
 #else
     if (verbose_given && version_given)
         pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
@@ -526,289 +297,118 @@ sg_atomic(int argc, char * argv[])
     }
 
     if (NULL == device_name) {
-        pr2serr("missing device name!\n\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
 
-    if (all_rn > 0) {
-        if (lba_op || num_op || in_op) {
-            pr2serr("Can't have --all= together with --lba=, --num= or "
-                    "--in=\n\n");
-            usage();
-            return SG_LIB_CONTRADICT;
-        }
-        /* here if --all= looks okay so far */
-    } else if (in_op && (lba_op || num_op)) {
-        pr2serr("expect '--in=' by itself, or both '--lba=' and "
-                "'--num='\n\n");
-        usage();
-        return SG_LIB_CONTRADICT;
-    } else if (in_op || (lba_op && num_op))
-        ;
-    else {
-        if (lba_op)
-            pr2serr("since '--lba=' is given, also need '--num='\n\n");
+    if (prefetch) {
+        if (cdb10)
+            cdb_name = "Pre-fetch(10)";
         else
-            pr2serr("expect either both '--lba=' and '--num=', or "
-                    "'--in=', or '--all='\n\n");
-        usage();
-        return SG_LIB_CONTRADICT;
-    }
+            cdb_name = "Pre-fetch(16)";
+    } else
+        cdb_name = "Seek(10)";
 
-    if (all_rn > 0) {
-        if ((all_last > 0) && (all_start > all_last)) {
-            pr2serr("in --all=ST,RN,LA start address (ST) exceeds last "
-                    "address (LA)\n");
-            return SG_LIB_CONTRADICT;
-        }
-    } else {
-        memset(addr_arr, 0, sizeof(addr_arr));
-        memset(num_arr, 0, sizeof(num_arr));
-        addr_arr_len = 0;
-        if (lba_op && num_op) {
-            if (0 != build_lba_arr(lba_op, addr_arr, &addr_arr_len,
-                                   MAX_NUM_ADDR)) {
-                pr2serr("bad argument to '--lba'\n");
-                return SG_LIB_SYNTAX_ERROR;
-            }
-            if (0 != build_num_arr(num_op, num_arr, &num_arr_len,
-                                   MAX_NUM_ADDR)) {
-                pr2serr("bad argument to '--num'\n");
-                return SG_LIB_SYNTAX_ERROR;
-            }
-            if ((addr_arr_len != num_arr_len) || (num_arr_len <= 0)) {
-                pr2serr("need same number of arguments to '--lba=' "
-                        "and '--num=' options\n");
-                return SG_LIB_CONTRADICT;
-            }
-        }
-        if (in_op) {
-            if (0 != build_joint_arr(in_op, addr_arr, num_arr, &addr_arr_len,
-                                     MAX_NUM_ADDR)) {
-                pr2serr("bad argument to '--in'\n");
-                return SG_LIB_SYNTAX_ERROR;
-            }
-            if (addr_arr_len <= 0) {
-                pr2serr("no addresses found in '--in=' argument, file: %s\n",
-                        in_op);
-                return SG_LIB_SYNTAX_ERROR;
-            }
-        }
-        param_len = 8 + (16 * addr_arr_len);
-        memset(param_arr, 0, param_len);
-        k = 8;
-        for (j = 0; j < addr_arr_len; ++j) {
-            sg_put_unaligned_be64(addr_arr[j], param_arr + k);
-            k += 8;
-            sg_put_unaligned_be32(num_arr[j], param_arr + k);
-            k += 4 + 4;
-        }
-        k = 0;
-        num = param_len - 2;
-        sg_put_unaligned_be16((uint16_t)num, param_arr + k);
-        k += 2;
-        num = param_len - 8;
-        sg_put_unaligned_be16((uint16_t)num, param_arr + k);
-    }
-
-    sg_fd = sg_cmds_open_device(device_name, false /* rw */, vb);
-    printf("%s device_name=%s sg_fd=%d\n", __func__, device_name, sg_fd);
+    sg_fd = sg_cmds_open_device(device_name, readonly, verbose);
     if (sg_fd < 0) {
+        if (verbose)
+            pr2serr("open error: %s: %s %s\n", device_name, cdb_name,
+                    safe_strerror(-sg_fd));
         ret = sg_convert_errno(-sg_fd);
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        goto err_out;
+        goto fini;
     }
-    ret = sg_simple_inquiry(sg_fd, &inq_resp, true, vb);
-    printf("%s2 device_name=%s sg_fd=%d ret=%c after inq all_rn=%d addr_arr_len=%d\n", __func__, device_name, sg_fd, ret, all_rn, addr_arr_len);
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+    if (do_time) {
+        start_tm.tv_sec = 0;
+        start_tm.tv_nsec = 0;
+        if (0 == clock_gettime(CLOCK_MONOTONIC, &start_tm))
+            start_tm_valid = true;
+        else
+            perror("clock_gettime(CLOCK_MONOTONIC)\n");
+    }
+#elif defined(HAVE_GETTIMEOFDAY)
+    if (do_time) {
+        start_tm.tv_sec = 0;
+        start_tm.tv_usec = 0;
+        gettimeofday(&start_tm, NULL);
+        start_tm_valid = true;
+    }
+#else
+    start_tm_valid = false;
+#endif
 
-
-    if (all_rn > 0) {
-        bool last_retry;
-        bool to_end_of_device = false;
-        uint64_t ull;
-        uint32_t bump;
-
-        printf("%s2 device_name=%s sg_fd=%d RETURNING for all_rn\n", __func__, device_name, sg_fd);
-        return -1;
-        if (0 == all_last) {    /* READ CAPACITY(10 or 16) to find last */
-            uint8_t resp_buff[RCAP16_RESP_LEN];
-
-            res = sg_ll_readcap_16(sg_fd, false /* pmi */, 0 /* llba */,
-                                   resp_buff, RCAP16_RESP_LEN, true, vb);
-            if (SG_LIB_CAT_UNIT_ATTENTION == res) {
-                pr2serr("Read capacity(16) unit attention, try again\n");
-                res = sg_ll_readcap_16(sg_fd, false, 0, resp_buff,
-                                       RCAP16_RESP_LEN, true, vb);
-            }
-            if (0 == res) {
-                if (vb > 3) {
-                    pr2serr("Read capacity(16) response:\n");
-                    hex2stderr(resp_buff, RCAP16_RESP_LEN, 1);
-                }
-                all_last = sg_get_unaligned_be64(resp_buff + 0);
-            } else if ((SG_LIB_CAT_INVALID_OP == res) ||
-                       (SG_LIB_CAT_ILLEGAL_REQ == res)) {
-                if (vb)
-                    pr2serr("Read capacity(16) not supported, try Read "
-                            "capacity(10)\n");
-                res = sg_ll_readcap_10(sg_fd, false /* pmi */, 0 /* lba */,
-                                       resp_buff, RCAP10_RESP_LEN, true,
-                                       vb);
-                if (0 == res) {
-                    if (vb > 3) {
-                        pr2serr("Read capacity(10) response:\n");
-                        hex2stderr(resp_buff, RCAP10_RESP_LEN, 1);
-                    }
-                    all_last = (uint64_t)sg_get_unaligned_be32(resp_buff + 0);
-                } else {
-                    if (res < 0)
-                        res = sg_convert_errno(-res);
-                    pr2serr("Read capacity(10) failed\n");
-                    ret = res;
-                    goto err_out;
-                }
-            } else {
-                if (res < 0)
-                    res = sg_convert_errno(-res);
-                pr2serr("Read capacity(16) failed\n");
-                ret = res;
-                goto err_out;
-            }
-            if (all_start > all_last) {
-                pr2serr("after READ CAPACITY the last block (0x%" PRIx64
-                        ") less than start address (0x%" PRIx64 ")\n",
-                        all_start, all_last);
-                ret = SG_LIB_CONTRADICT;
-                goto err_out;
-            }
-            to_end_of_device = true;
-        }
-        if (! do_force) {
-            char b[120];
-
-            printf("%s is:  %.8s  %.16s  %.4s\n", device_name,
-                   inq_resp.vendor, inq_resp.product, inq_resp.revision);
-            sleep_for(3);
-            if (to_end_of_device)
-                snprintf(b, sizeof(b), "LBA 0x%" PRIx64 " to end of %s "
-                         "(0x%" PRIx64 ")", all_start, device_name, all_last);
-            else
-                snprintf(b, sizeof(b), "LBA 0x%" PRIx64 " to 0x%" PRIx64
-                         " on %s", all_start, all_last, device_name);
-            printf("\nAn UNMAP (a.k.a. trim) will commence in 15 seconds\n");
-            printf("    ALL data from %s will be LOST\n", b);
-            printf("        Press control-C to abort\n");
-            sleep_for(5);
-            printf("\nAn UNMAP will commence in 10 seconds\n");
-            printf("    ALL data from %s will be LOST\n", b);
-            printf("        Press control-C to abort\n");
-            sleep_for(5);
-            printf("\nAn UNMAP (a.k.a. trim) will commence in 5 seconds\n");
-            printf("    ALL data from %s will be LOST\n", b);
-            printf("        Press control-C to abort\n");
-            sleep_for(7);
-        }
-        if (dry_run) {
-            pr2serr("Doing dry-run, would have unmapped from LBA 0x%" PRIx64
-                    " to 0x%" PRIx64 "\n    %u blocks per UNMAP command\n",
-                    all_start, all_last, all_rn);
-           goto err_out;
-        }
-        last_retry = false;
-        param_len = 8 + (16 * 1);
-        for (ull = all_start, j = 0; ull <= all_last; ull += bump, ++j) {
-            if ((all_last - ull) < all_rn)
-                bump = (uint32_t)(all_last + 1 - ull);
-            else
-                bump = all_rn;
-retry:
-            memset(param_arr, 0, param_len);
-            k = 8;
-            sg_put_unaligned_be64(ull, param_arr + k);
-            k += 8;
-            sg_put_unaligned_be32(bump, param_arr + k);
-            k = 0;
-            num = param_len - 2;
-            sg_put_unaligned_be16((uint16_t)num, param_arr + k);
-            k += 2;
-            num = param_len - 8;
-            sg_put_unaligned_be16((uint16_t)num, param_arr + k);
-            ret = sg_ll_unmap_v2(sg_fd, anchor, grpnum, timeout, param_arr,
-                                 param_len, true, (vb > 2 ? vb - 2 : 0));
-            if (last_retry)
-                break;
-            if (ret) {
-                if ((SG_LIB_LBA_OUT_OF_RANGE == ret) &&
-                    ((ull + bump) > all_last)) {
-                    pr2serr("Typical end of disk out-of-range, decrement "
-                            "count and retry\n");
-                    if (bump > 1) {
-                        --bump;
-                        last_retry = true;
-                        goto retry;
-                    }  /* if bump==1 can't do last, so we are finished */
-                }
-                break;
-            }
-        }       /* end of for loop doing unmaps */
-        if (vb)
-            pr2serr("Completed %d UNMAP commands\n", j);
-    } else {            /* --all= not given */
-
-        printf("%s2 device_name=%s sg_fd=%d !all_rn dry_run=%d do_force=%d addr_arr_len=%d\n", __func__, device_name, sg_fd, dry_run, do_force, addr_arr_len);
-
-        if (dry_run) {
-            pr2serr("Doing dry-run so here is 'LBA, number_of_blocks' list "
-                    "of candidates\n");
-            k = 8;
-            for (j = 0; j < addr_arr_len; ++j) {
-                printf("    0x%" PRIx64 ", 0x%u\n",
-                      sg_get_unaligned_be64(param_arr + k),
-                      sg_get_unaligned_be32(param_arr + k + 8));
-                k += (8 + 4 + 4);
-            }
-            goto err_out;
-        }
-        if (! do_force) {
-            printf("%s is:  %.8s  %.16s  %.4s\n", device_name,
-                   inq_resp.vendor, inq_resp.product, inq_resp.revision);
-            sleep_for(3);
-            printf("\nAn ATOMIC_WRITE will commence in 15 seconds\n");
-            printf("    Some data will be LOST\n");
-            printf("        Press control-C to abort\n");
-            sleep_for(10);
-        }
-        printf("%s2 device_name=%s sg_fd=%d RETURNING before calling sg_ll_atomic_v2 !all_rn dry_run=%d do_force=%d\n", __func__, device_name, sg_fd, dry_run, do_force);
-        res = sg_ll_atomic_v2(sg_fd, anchor, grpnum, timeout, param_arr,
-                             param_len, true, vb);
-        printf("%s3 device_name=%s sg_fd=%d RETURNING after res=%d calling sg_ll_atomic_v2\n", __func__, device_name, sg_fd, res);
-        return -1;
-        ret = res;
-        err_printed = true;
-        switch (ret) {
-        case SG_LIB_CAT_NOT_READY:
-            pr2serr("UNMAP failed, device not ready\n");
-            break;
-        case SG_LIB_CAT_UNIT_ATTENTION:
-            pr2serr("UNMAP, unit attention\n");
-            break;
-        case SG_LIB_CAT_ABORTED_COMMAND:
-            pr2serr("UNMAP, aborted command\n");
-            break;
-        case SG_LIB_CAT_INVALID_OP:
-            pr2serr("UNMAP not supported\n");
-            break;
-        case SG_LIB_CAT_ILLEGAL_REQ:
-            pr2serr("bad field in UNMAP cdb\n");
-            break;
-        default:
-            err_printed = false;
-            break;
-        }
+    for (k = 0, lba_n = lba; k < count; ++k, lba_n += skip) {
+        if (wrap_offs && (lba_n > lba) && ((lba_n - lba) > wrap_offs))
+            lba_n = lba;
+        res = sg_ll_atomic_v2(sg_fd, ! prefetch, ! cdb10, immed, lba_n,
+                                numblocks, grpnum, 0, (verbose > 0), verbose);
+        ret = res;      /* last command executed sets exit status */
+        if (SG_LIB_CAT_CONDITION_MET == res)
+            ++num_cond_met;
+        else if (res) {
+            ++num_err;
+            if (0 == first_err)
+                first_err = res;
+            last_err = res;
+        } else
+            ++num_good;
     }
 
-err_out:
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+    if ((count > 0) && start_tm_valid &&
+        (start_tm.tv_sec || start_tm.tv_nsec)) {
+        int err;
+
+        res = clock_gettime(CLOCK_MONOTONIC, &end_tm);
+        if (res < 0) {
+            err = errno;
+            perror("clock_gettime");
+            if (EINVAL == err)
+                pr2serr("clock_gettime(CLOCK_MONOTONIC) not supported\n");
+        }
+        elapsed_usecs = (end_tm.tv_sec - start_tm.tv_sec) * 1000000;
+        /* Note that (end_tm.tv_nsec - start_tm.tv_nsec) may be negative */
+        elapsed_usecs += (end_tm.tv_nsec - start_tm.tv_nsec) / 1000;
+    }
+#elif defined(HAVE_GETTIMEOFDAY)
+    if ((count > 0) && start_tm_valid &&
+        (start_tm.tv_sec || start_tm.tv_usec)) {
+        gettimeofday(&end_tm, NULL);
+        elapsed_usecs = (end_tm.tv_sec - start_tm.tv_sec) * 1000000;
+        elapsed_usecs += (end_tm.tv_usec - start_tm.tv_usec);
+    }
+#endif
+
+    if (elapsed_usecs > 0) {
+        if (elapsed_usecs > 1000000)
+            snprintf(b, sizeof(b), " (over %d seconds)",
+                    (int)elapsed_usecs / 1000000);
+        else
+            b[0] = '\0';
+        printf("Elapsed time: %" PRId64 " microseconds%s, per command time: "
+               "%" PRId64 "\n", elapsed_usecs, b, elapsed_usecs / count);
+    }
+
+    if (count_given && verbose_given)
+        printf("Command count=%u, number of condition_mets=%u, number of "
+               "goods=%u\n", count, num_cond_met, num_good);
+    if (first_err) {
+        bool printed;
+
+        printf(" number of errors=%d\n", num_err);
+        printf("    first error");
+        printed = sg_if_can2stdout(": ", first_err);
+        if (! printed)
+            printf(" code: %d\n", first_err);
+        if (num_err > 1) {
+            printf("    last error");
+            printed = sg_if_can2stdout(": ", last_err);
+            if (! printed)
+                printf(" code: %d\n", last_err);
+        }
+    }
+fini:
     if (sg_fd >= 0) {
         res = sg_cmds_close_device(sg_fd);
         if (res < 0) {
@@ -817,10 +417,13 @@ err_out:
                 ret = sg_convert_errno(-res);
         }
     }
-    if ((0 == vb) && (! err_printed)) {
-        if (! sg_if_can2stderr("sg_unmap failed: ", ret))
-            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
-                    "more information\n");
+    if (0 == verbose) {
+        const char * e_str = (SG_LIB_CAT_CONDITION_MET == ret) ?
+                             "sg_seek: " : "sg_seek: failed";
+        
+        if (! sg_if_can2stderr(e_str, ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }
