@@ -2238,7 +2238,7 @@ int
 sg_ll_atomic_v2(int sg_fd, bool anchor, int group_num, int timeout_secs,
                void * paramp, int param_len, bool noisy, int vb)
 {
-    static const char * const cdb_s = "unmap";
+    static const char * const cdb_s = "atomic";
     int res, ret, s_cat, tmout;
     uint8_t uw_cdb[WRITE_ATOMIC_16_LEN] =
                          {WRITE_ATOMIC_16, 0, 0, 0, 0, 0, 0, 0, 0, 0};
