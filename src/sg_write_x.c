@@ -1292,8 +1292,8 @@ do_write_x(int sg_fd, const void * dataoutp, int dout_len,
     }
     if (op->dry_run) {
         if (vb)
-            pr2serr("Exit just before sending %s due to --dry-run\n",
-                    op->cdb_name);
+            pr2serr("Exit just before sending %s due to --dry-run x_cdb[0]=0x%x dout_len=%d\n",
+                    op->cdb_name, x_cdb[0], dout_len);
         if (op->dry_run > 1) {
             int w_fd;
 
@@ -1326,6 +1326,7 @@ do_write_x(int sg_fd, const void * dataoutp, int dout_len,
         return sg_convert_errno(ENOMEM);
     }
     set_scsi_pt_cdb(ptvp, x_cdb, cdb_len);
+ ///   return 0;
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
     if (dout_len > 0)
         set_scsi_pt_data_out(ptvp, (uint8_t *)dataoutp, dout_len);

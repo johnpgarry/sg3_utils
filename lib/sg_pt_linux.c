@@ -642,7 +642,7 @@ set_scsi_pt_cdb(struct sg_pt_base * vp, const uint8_t * cdb,
                 int cdb_len)
 {
     struct sg_pt_linux_scsi * ptp = &vp->impl;
-
+    printf("%s cdb[0]=0x%x\n", __func__, cdb[0]);
     ptp->io_hdr.request = (__u64)(sg_uintptr_t)cdb;
     ptp->io_hdr.request_len = cdb_len;
 }
